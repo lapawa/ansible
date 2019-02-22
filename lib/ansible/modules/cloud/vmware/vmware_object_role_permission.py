@@ -41,6 +41,9 @@ options:
     description:
     - The group to be assigned permission.
     - Required if C(principal) is not specified.
+  datacenter_name:
+    description:
+    The name of the datacenter that will contain the Folder
   object_name:
     description:
     - The object name to assigned permission.
@@ -106,7 +109,8 @@ except ImportError:
     pass
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible.module_utils.vmware import PyVmomi, vmware_argument_spec, find_obj
+from ansible.module_utils.vmware import PyVmomi, find_datacenter_by_name, vmware_argument_spec, find_obj
+from ansible.module_utils._text import to_native
 
 
 class VMwareObjectRolePermission(PyVmomi):
@@ -120,6 +124,7 @@ class VMwareObjectRolePermission(PyVmomi):
         elif self.params.get('group', None) is not None:
             self.applied_to = self.params['group']
             self.is_group = True
+        self.datacenter_object = self.get_datacenter_by_name(self.params.get('datacenter_name', None))
 
         self.get_role()
         self.get_object()
@@ -180,6 +185,21 @@ class VMwareObjectRolePermission(PyVmomi):
         self.content.authorizationManager.RemoveEntityPermission(self.current_obj, self.applied_to, self.is_group)
         self.module.exit_json(changed=True)
 
+    def get_datacenter_by_name(self, name_= None):
+        if name_ is None:
+            return None
+        try:
+            datacenter_obj = find_datacenter_by_name(self.content, name_)
+            return datacenter_obj
+        except (vmodl.MethodFault, vmodl.RuntimeFault) as runtime_fault:
+            self.module.fail_json(msg="Failed to get datacenter '%s'"
+                                    " due to : %s" % (name_,
+                                                      to_native(runtime_fault.msg)))
+        except Exception as generic_exc:
+            self.module.fail_json(msg="Failed to get datacenter"
+                                  " '%s' due to generic error: %s" % (name_,
+                                                                      to_native(generic_exc)))
+
     def get_role(self):
         for role in self.content.authorizationManager.roleList:
             if role.name == self.params['role']:
@@ -193,9 +213,13 @@ class VMwareObjectRolePermission(PyVmomi):
         except AttributeError:
             self.module.fail_json(msg="Object type %s is not valid." % self.params['object_type'])
 
+        find_root_node = None
+        if self.datacenter_object is not None:
+            find_root_node = self.datacenter_object
+
         self.current_obj = find_obj(content=self.content,
                                     vimtype=[getattr(vim, self.params['object_type'])],
-                                    name=self.params['object_name'])
+                                    name=self.params['object_name'], folder = find_root_node)
 
         if self.current_obj is None:
             self.module.fail_json(msg="Specified object %s of type %s was not found." % (self.params['object_name'],
@@ -207,6 +231,7 @@ def main():
     argument_spec.update(dict(
         role=dict(required=True, type='str'),
         object_name=dict(required=True, type='str'),
+        datacenter_name=dict(required=False, type='str', aliases=['datacenter']),
         object_type=dict(type='str', default='Folder',
                          choices=['Folder', 'VirtualMachine', 'Datacenter', 'ResourcePool',
                                   'Datastore', 'Network', 'HostSystem', 'ComputeResource',
